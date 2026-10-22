@@ -45,14 +45,20 @@ if not sh:
     st.stop()
 
 def ler_aba(nome_aba):
-    aba = sh.worksheet(nome_aba)
-    dados = aba.get_all_records()
-    return pd.DataFrame(dados)
+    try:
+        aba = sh.worksheet(nome_aba)
+        dados = aba.get_all_records()
+        return pd.DataFrame(dados)
+    except gspread.exceptions.WorksheetNotFound:
+        # Cria a aba automaticamente caso ela ainda não exista no Google Sheets
+        sh.add_worksheet(title=nome_aba, rows="100", cols="20")
+        return pd.DataFrame()
 
 def atualizar_aba(nome_aba, df):
     aba = sh.worksheet(nome_aba)
     aba.clear()
-    aba.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
+    if not df.empty:
+        aba.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
 
 # -------------------------------------------------------------------
 # MENU LATERAL
@@ -133,7 +139,7 @@ if menu == "PDV (Saída de Estoque)":
                     st.warning(f"⚠️ **Saída sem cobrança.** Custo gerado para o caixa: **R$ {custo_total_consumo:.2f}**")
                     total_operacao = 0.0
                 
-                # Controle de estado para evitar duplo clique acidental
+                # Controle de trava contra duplo clique acidental
                 if "processando_venda" not in st.session_state:
                     st.session_state.processando_venda = False
 
@@ -178,7 +184,7 @@ if menu == "PDV (Saída de Estoque)":
                     st.rerun()
 
 # -------------------------------------------------------------------
-# 2. CADASTRO E ENTRADA DE ESTOQUE (Sem form para evitar disparo do Enter)
+# 2. CADASTRO E ENTRADA DE ESTOQUE
 # -------------------------------------------------------------------
 elif menu == "Cadastro / Entrada de Estoque":
     st.header("📦 Alimentar / Cadastrar Estoque")
@@ -273,7 +279,7 @@ elif menu == "Cadastro / Entrada de Estoque":
                 st.balloons()
 
 # -------------------------------------------------------------------
-# 3. POSIÇÃO DE ESTOQUE E ALERTAS INTELIGENTES
+# 3. POSIÇÃO DE ESTOQUE E ALERTAS
 # -------------------------------------------------------------------
 elif menu == "Posição de Estoque":
     st.header("📊 Posição Geral do Estoque e Alertas")
@@ -313,7 +319,6 @@ elif menu == "Posição de Estoque":
             
             giro_prod = giro_mensal.get(p_id, 0.0)
             
-            # Lógica corrigida para disparo de estoque baixo
             if est_min > 0:
                 limite_alerta = est_min
             elif giro_prod > 0:
@@ -447,14 +452,15 @@ elif menu == "Despesas Extras":
                 st.balloons()
 
 # -------------------------------------------------------------------
-# 6. FATURAMENTO E FINANCEIRO
+# 6. FATURAMENTO, FINANCEIRO E AUDITORIA DE CANCELAMENTOS
 # -------------------------------------------------------------------
 elif menu == "Faturamento e Financeiro":
-    st.header("📈 Visão Financeira Geral (DRE)")
+    st.header("📈 Visão Financeira Geral (DRE) & Auditoria")
     
     df_vendas = ler_aba("Vendas")
     df_despesas = ler_aba("Despesas_Extras")
     df_produtos = ler_aba("Produtos_Estoque")
+    df_canceladas = ler_aba("Vendas_Canceladas")
     
     faturamento_total = 0.0
     despesas_totais = 0.0
@@ -511,12 +517,78 @@ elif menu == "Faturamento e Financeiro":
     
     col_vendas, col_despesas = st.columns(2)
     with col_vendas:
-        st.subheader("Histórico Geral de Saídas")
+        st.subheader("Histórico Geral de Saídas Ativas")
         st.dataframe(df_vendas, use_container_width=True)
         
     with col_despesas:
         st.subheader("Histórico Geral de Despesas Extras / Custos Internos")
         st.dataframe(df_despesas, use_container_width=True)
+        
+    # --- CANCELAMENTO COM REGISTRO DE AUDITORIA ---
+    st.divider()
+    st.subheader("🚫 Cancelamento de Venda com Registro de Auditoria")
+    st.markdown("Cancele vendas com erro de lançamento. O sistema estornará o estoque, corrigirá o caixa e **salvará o histórico do cancelamento para auditoria**.")
+    
+    if df_vendas.empty:
+        st.info("Não há vendas registradas para cancelar.")
+    else:
+        df_vendas['Label_Cancel'] = df_vendas.apply(
+            lambda row: f"ID Venda: {row['ID_Venda']} | Data: {row['Data_Hora']} | Produto: {row['Nome_Produto']} | Qtd: {row['Quantidade']} | Total: R$ {float(row['Valor_Total']):.2f}", 
+            axis=1
+        )
+        
+        venda_para_cancelar = st.selectbox("Selecione a Venda a Cancelar", df_vendas['Label_Cancel'].tolist())
+        motivo_cancelamento = st.text_input("Motivo do Cancelamento (ex: Erro de lançamento / Duplo clique)")
+        
+        if st.button("⚠️ Confirmar e Auditoriar Cancelamento", type="secondary"):
+            if not motivo_cancelamento.strip():
+                st.error("⚠️ Por favor, escreva o motivo do cancelamento antes de continuar.")
+            else:
+                venda_sel = df_vendas[df_vendas['Label_Cancel'] == venda_para_cancelar].iloc[0]
+                
+                id_venda_alvo = venda_sel['ID_Venda']
+                id_produto_alvo = venda_sel['ID_Produto']
+                qtd_estornar = float(venda_sel['Quantidade'])
+                
+                # 1. Copia o registro para a aba 'Vendas_Canceladas' para auditoria
+                registro_cancelado = pd.DataFrame([{
+                    "ID_Venda_Original": id_venda_alvo,
+                    "Data_Hora_Venda": venda_sel['Data_Hora'],
+                    "Data_Hora_Cancelamento": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ID_Produto": id_produto_alvo,
+                    "Nome_Produto": venda_sel['Nome_Produto'],
+                    "Quantidade_Estornada": qtd_estornar,
+                    "Valor_Total": venda_sel['Valor_Total'],
+                    "Motivo": motivo_cancelamento
+                }])
+                
+                df_canceladas_novo = pd.concat([df_canceladas, registro_cancelado], ignore_index=True)
+                atualizar_aba("Vendas_Canceladas", df_canceladas_novo)
+                
+                # 2. Devolve o produto ao estoque
+                df_produtos['ID_Produto'] = pd.to_numeric(df_produtos['ID_Produto'], errors='coerce')
+                df_produtos['Quantidade_Estoque'] = pd.to_numeric(df_produtos['Quantidade_Estoque'], errors='coerce').fillna(0.0)
+                
+                mask_prod = df_produtos['ID_Produto'] == id_produto_alvo
+                if mask_prod.any():
+                    df_produtos.loc[mask_prod, 'Quantidade_Estoque'] += qtd_estornar
+                    atualizar_aba("Produtos_Estoque", df_produtos)
+                
+                # 3. Remove da tabela de vendas ativas
+                df_vendas_novo = df_vendas[df_vendas['ID_Venda'] != id_venda_alvo]
+                if 'Label_Cancel' in df_vendas_novo.columns:
+                    df_vendas_novo = df_vendas_novo.drop(columns=['Label_Cancel'])
+                    
+                atualizar_aba("Vendas", df_vendas_novo)
+                
+                st.success(f"✅ Venda ID {id_venda_alvo} cancelada e movida para a aba de Auditoria! {qtd_estornar} unidade(s) devolvida(s) ao estoque.")
+                st.balloons()
+                st.rerun()
+
+    # Exibe a tabela de auditoria de cancelamentos
+    if not df_canceladas.empty:
+        st.subheader("🕵️ Histórico de Vendas Canceladas (Auditoria)")
+        st.dataframe(df_canceladas, use_container_width=True)
 
 # -------------------------------------------------------------------
 # 7. FECHAMENTO DIÁRIO & CURVA ABC
@@ -529,7 +601,6 @@ elif menu == "Fechamento Diário & Curva ABC":
     
     tab_caixa, tab_abc = st.tabs(["💵 Fechamento do Dia", "📊 Curva ABC (Ranking)"])
     
-    # --- TAB 1: FECHAMENTO DE CAIXA DIÁRIO ---
     with tab_caixa:
         st.subheader("🔍 Conferência Diária de Caixa")
         
@@ -586,7 +657,6 @@ elif menu == "Fechamento Diário & Curva ABC":
             else:
                 st.info("Nenhuma despesa registrada nesta data.")
 
-    # --- TAB 2: CURVA ABC DE PRODUTOS ---
     with tab_abc:
         st.subheader("🏆 Ranking de Vendas e Curva ABC de Produtos")
         
