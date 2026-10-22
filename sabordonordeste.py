@@ -30,7 +30,7 @@ def conectar_google_sheets():
             if "spreadsheet_url" in st.secrets:
                 return gc.open_by_url(st.secrets["spreadsheet_url"])
             else:
-                return gc.open("BD_Minimercado")
+                return gc.open("BD_Sabordonordeste")
         else:
             st.error("O bloco 'gcp_service_account' não foi encontrado nos st.secrets!")
             return None
