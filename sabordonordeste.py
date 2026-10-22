@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import gspread
 from gspread import service_account_from_dict
 
@@ -30,7 +30,7 @@ def conectar_google_sheets():
             if "spreadsheet_url" in st.secrets:
                 return gc.open_by_url(st.secrets["spreadsheet_url"])
             else:
-                return gc.open("BD_Sabordonordeste")
+                return gc.open("BD_Minimercado")
         else:
             st.error("O bloco 'gcp_service_account' não foi encontrado nos st.secrets!")
             return None
@@ -59,6 +59,9 @@ def atualizar_aba(nome_aba, df):
     if not df.empty:
         aba.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
 
+# Fuso horário padrão do Brasil (UTC-3)
+FUSO_BR = timezone(timedelta(hours=-3))
+
 # -------------------------------------------------------------------
 # MENU LATERAL
 # -------------------------------------------------------------------
@@ -83,7 +86,6 @@ menu = st.sidebar.selectbox(
 if menu == "PDV (Saída de Estoque)":
     st.header("🛍️ Frente de Caixa e Saída de Estoque")
     
-    # Sub-abas dentro do PDV para separar a operação de caixa do cancelamento
     sub_pdv = st.radio("Ação no Caixa", ["Registrar Saída / Venda", "Cancelar Venda Recente"], horizontal=True)
     
     df_produtos = ler_aba("Produtos_Estoque")
@@ -142,7 +144,6 @@ if menu == "PDV (Saída de Estoque)":
                         st.warning(f"⚠️ **Saída sem cobrança.** Custo gerado para o caixa: **R$ {custo_total_consumo:.2f}**")
                         total_operacao = 0.0
                     
-                    # Controle de trava contra duplo clique mantendo a visibilidade da mensagem
                     if "processando_venda" not in st.session_state:
                         st.session_state.processando_venda = False
 
@@ -154,9 +155,12 @@ if menu == "PDV (Saída de Estoque)":
                             if 'Tipo_Saida' not in df_vendas.columns:
                                 df_vendas['Tipo_Saida'] = "Venda Normal"
                                 
+                            # Hora ajustada para o Brasil
+                            hora_brasil = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
+                            
                             nova_venda = pd.DataFrame([{
                                 "ID_Venda": len(df_vendas) + 1,
-                                "Data_Hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "Data_Hora": hora_brasil,
                                 "ID_Produto": item['ID_Produto'],
                                 "Nome_Produto": item['Nome_Produto'],
                                 "Quantidade": qtd,
@@ -169,9 +173,10 @@ if menu == "PDV (Saída de Estoque)":
                             
                             if "Venda Normal" not in tipo_operacao:
                                 df_despesas = ler_aba("Despesas_Extras")
+                                data_brasil = datetime.now(FUSO_BR).strftime("%Y-%m-%d")
                                 nova_despesa = pd.DataFrame([{
                                     "ID_Despesa": len(df_despesas) + 1,
-                                    "Data": datetime.now().strftime("%Y-%m-%d"),
+                                    "Data": data_brasil,
                                     "Categoria_Despesa": tipo_operacao.replace("🛒 ", "").replace("🏠 ", "").replace("🎁 ", ""),
                                     "Descricao": f"Custo de {qtd} {unidade} de {item['Nome_Produto']}",
                                     "Valor": float(qtd) * float(item['Custo_Unitario'])
@@ -195,7 +200,6 @@ if menu == "PDV (Saída de Estoque)":
         if df_vendas.empty:
             st.info("Não há vendas registradas para cancelar.")
         else:
-            # Mostra apenas as vendas do dia ou as últimas para o operador não ver o histórico financeiro completo
             df_vendas['Label_Cancel'] = df_vendas.apply(
                 lambda row: f"ID: {row['ID_Venda']} | Data: {row['Data_Hora']} | Produto: {row['Nome_Produto']} | Qtd: {row['Quantidade']} | Total: R$ {float(row['Valor_Total']):.2f}", 
                 axis=1
@@ -214,11 +218,12 @@ if menu == "PDV (Saída de Estoque)":
                     id_produto_alvo = venda_sel['ID_Produto']
                     qtd_estornar = float(venda_sel['Quantidade'])
                     
-                    # 1. Salva na aba de auditoria
+                    hora_cancel_brasil = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
+                    
                     registro_cancelado = pd.DataFrame([{
                         "ID_Venda_Original": id_venda_alvo,
                         "Data_Hora_Venda": venda_sel['Data_Hora'],
-                        "Data_Hora_Cancelamento": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Data_Hora_Cancelamento": hora_cancel_brasil,
                         "ID_Produto": id_produto_alvo,
                         "Nome_Produto": venda_sel['Nome_Produto'],
                         "Quantidade_Estornada": qtd_estornar,
@@ -229,7 +234,6 @@ if menu == "PDV (Saída de Estoque)":
                     df_canceladas_novo = pd.concat([df_canceladas, registro_cancelado], ignore_index=True)
                     atualizar_aba("Vendas_Canceladas", df_canceladas_novo)
                     
-                    # 2. Devolve ao estoque
                     df_produtos['ID_Produto'] = pd.to_numeric(df_produtos['ID_Produto'], errors='coerce')
                     df_produtos['Quantidade_Estoque'] = pd.to_numeric(df_produtos['Quantidade_Estoque'], errors='coerce').fillna(0.0)
                     
@@ -238,7 +242,6 @@ if menu == "PDV (Saída de Estoque)":
                         df_produtos.loc[mask_prod, 'Quantidade_Estoque'] += qtd_estornar
                         atualizar_aba("Produtos_Estoque", df_produtos)
                     
-                    # 3. Remove das vendas ativas
                     df_vendas_novo = df_vendas[df_vendas['ID_Venda'] != id_venda_alvo]
                     if 'Label_Cancel' in df_vendas_novo.columns:
                         df_vendas_novo = df_vendas_novo.drop(columns=['Label_Cancel'])
@@ -297,9 +300,10 @@ elif menu == "Cadastro / Entrada de Estoque":
                 atualizar_aba("Produtos_Estoque", df_atualizado)
                 
                 df_entradas = ler_aba("Historico_Entradas")
+                hora_brasil = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
                 nova_entrada = pd.DataFrame([{
                     "ID_Entrada": len(df_entradas) + 1,
-                    "Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Data": hora_brasil,
                     "ID_Produto": novo_id,
                     "Quantidade_Adicionada": float(qtd_inicial),
                     "Custo_Unitario": custo
@@ -331,9 +335,10 @@ elif menu == "Cadastro / Entrada de Estoque":
                 atualizar_aba("Produtos_Estoque", df_produtos)
                 
                 df_entradas = ler_aba("Historico_Entradas")
+                hora_brasil = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
                 nova_entrada = pd.DataFrame([{
                     "ID_Entrada": len(df_entradas) + 1,
-                    "Data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Data": hora_brasil,
                     "ID_Produto": item_sel['ID_Produto'],
                     "Quantidade_Adicionada": float(qtd_add),
                     "Custo_Unitario": item_sel['Custo_Unitario']
@@ -367,7 +372,7 @@ elif menu == "Posição de Estoque":
         df_vendas_30d = pd.DataFrame()
         if not df_vendas.empty:
             df_vendas['Data_Hora_dt'] = pd.to_datetime(df_vendas['Data_Hora'], errors='coerce')
-            data_limite = datetime.now() - timedelta(days=30)
+            data_limite = datetime.now(FUSO_BR).replace(tzinfo=None) - timedelta(days=30)
             df_vendas_30d = df_vendas[df_vendas['Data_Hora_dt'] >= data_limite]
         
         giro_mensal = {}
@@ -401,7 +406,7 @@ elif menu == "Posição de Estoque":
                 })
         
         produtos_sem_saida = []
-        data_limite_sem_saida = datetime.now() - timedelta(days=dias_sem_giro)
+        data_limite_sem_saida = datetime.now(FUSO_BR).replace(tzinfo=None) - timedelta(days=dias_sem_giro)
         
         for _, prod in df_produtos.iterrows():
             p_id = prod['ID_Produto']
@@ -517,7 +522,7 @@ elif menu == "Despesas Extras":
                 st.balloons()
 
 # -------------------------------------------------------------------
-# 6. FATURAMENTO E FINANCEIRO (Com Auditoria de Cancelamentos)
+# 6. FATURAMENTO E FINANCEIRO
 # -------------------------------------------------------------------
 elif menu == "Faturamento e Financeiro":
     st.header("📈 Visão Financeira Geral (DRE) & Auditoria")
@@ -608,7 +613,7 @@ elif menu == "Fechamento Diário & Curva ABC":
     with tab_caixa:
         st.subheader("🔍 Conferência Diária de Caixa")
         
-        data_sel = st.date_input("Selecione a Data para Conferência", value=datetime.now())
+        data_sel = st.date_input("Selecione a Data para Conferência", value=datetime.now(FUSO_BR))
         data_str = data_sel.strftime("%Y-%m-%d")
         
         vendas_dia = pd.DataFrame()
