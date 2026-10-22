@@ -50,7 +50,6 @@ def ler_aba(nome_aba):
         dados = aba.get_all_records()
         return pd.DataFrame(dados)
     except gspread.exceptions.WorksheetNotFound:
-        # Cria a aba automaticamente caso ela ainda não exista no Google Sheets
         sh.add_worksheet(title=nome_aba, rows="100", cols="20")
         return pd.DataFrame()
 
@@ -79,109 +78,175 @@ menu = st.sidebar.selectbox(
 )
 
 # -------------------------------------------------------------------
-# 1. PDV (VENDAS / CONSUMO / BONIFICAÇÃO)
+# 1. PDV (VENDAS / CONSUMO / BONIFICAÇÃO / CANCELAMENTO)
 # -------------------------------------------------------------------
 if menu == "PDV (Saída de Estoque)":
     st.header("🛍️ Frente de Caixa e Saída de Estoque")
     
+    # Sub-abas dentro do PDV para separar a operação de caixa do cancelamento
+    sub_pdv = st.radio("Ação no Caixa", ["Registrar Saída / Venda", "Cancelar Venda Recente"], horizontal=True)
+    
     df_produtos = ler_aba("Produtos_Estoque")
     
-    if df_produtos.empty:
-        st.info("Nenhum produto cadastrado no estoque.")
-    else:
-        df_produtos['Quantidade_Estoque'] = pd.to_numeric(df_produtos['Quantidade_Estoque'], errors='coerce').fillna(0.0)
-        df_produtos['Preco_Venda'] = pd.to_numeric(df_produtos['Preco_Venda'], errors='coerce').fillna(0.0)
-        df_produtos['Custo_Unitario'] = pd.to_numeric(df_produtos['Custo_Unitario'], errors='coerce').fillna(0.0)
-        if 'Unidade_Medida' not in df_produtos.columns:
-            df_produtos['Unidade_Medida'] = 'UN'
-        
-        produtos_disponiveis = df_produtos[df_produtos['Quantidade_Estoque'] > 0]
-        
-        if produtos_disponiveis.empty:
-            st.warning("Não há produtos com estoque disponível.")
+    if sub_pdv == "Registrar Saída / Venda":
+        if df_produtos.empty:
+            st.info("Nenhum produto cadastrado no estoque.")
         else:
-            tipo_operacao = st.radio("Tipo de Saída", ["🛒 Venda Normal", "🏠 Consumo Próprio / Uso Interno", "🎁 Bonificação / Cortesia"])
+            df_produtos['Quantidade_Estoque'] = pd.to_numeric(df_produtos['Quantidade_Estoque'], errors='coerce').fillna(0.0)
+            df_produtos['Preco_Venda'] = pd.to_numeric(df_produtos['Preco_Venda'], errors='coerce').fillna(0.0)
+            df_produtos['Custo_Unitario'] = pd.to_numeric(df_produtos['Custo_Unitario'], errors='coerce').fillna(0.0)
+            if 'Unidade_Medida' not in df_produtos.columns:
+                df_produtos['Unidade_Medida'] = 'UN'
             
-            produto_sel = st.selectbox("Selecione o Produto", produtos_disponiveis['Nome_Produto'].tolist())
+            produtos_disponiveis = df_produtos[df_produtos['Quantidade_Estoque'] > 0]
             
-            if produto_sel:
-                item = df_produtos[df_produtos['Nome_Produto'] == produto_sel].iloc[0]
-                unidade = str(item['Unidade_Medida']).upper()
+            if produtos_disponiveis.empty:
+                st.warning("Não há produtos com estoque disponível.")
+            else:
+                tipo_operacao = st.radio("Tipo de Saída", ["🛒 Venda Normal", "🏠 Consumo Próprio / Uso Interno", "🎁 Bonificação / Cortesia"])
                 
-                col_a, col_b, col_c = st.columns(3)
-                col_a.write(f"**Preço Venda:** R$ {item['Preco_Venda']:.2f}")
-                col_b.write(f"**Custo Unitário:** R$ {item['Custo_Unitario']:.2f}")
-                col_c.write(f"**Estoque Disponível:** {item['Quantidade_Estoque']:.3f} {unidade}")
+                produto_sel = st.selectbox("Selecione o Produto", produtos_disponiveis['Nome_Produto'].tolist())
                 
-                if unidade in ['KG', 'L']:
-                    qtd = st.number_input(
-                        f"Quantidade em {unidade} (ex: 0.150 para 150g)", 
-                        min_value=0.001, 
-                        max_value=float(item['Quantidade_Estoque']), 
-                        value=min(1.0, float(item['Quantidade_Estoque'])), 
-                        step=0.050, 
-                        format="%.3f"
-                    )
-                else:
-                    qtd = st.number_input(
-                        f"Quantidade em {unidade}", 
-                        min_value=1, 
-                        max_value=int(item['Quantidade_Estoque']), 
-                        value=1, 
-                        step=1
-                    )
-                
-                if "Venda Normal" in tipo_operacao:
-                    total_operacao = float(qtd) * float(item['Preco_Venda'])
-                    st.subheader(f"Total a Cobrar: R$ {total_operacao:.2f}")
-                else:
-                    custo_total_consumo = float(qtd) * float(item['Custo_Unitario'])
-                    st.warning(f"⚠️ **Saída sem cobrança.** Custo gerado para o caixa: **R$ {custo_total_consumo:.2f}**")
-                    total_operacao = 0.0
-                
-                # Controle de trava contra duplo clique acidental
-                if "processando_venda" not in st.session_state:
-                    st.session_state.processando_venda = False
-
-                if st.button("Confirmar Operação", type="primary", disabled=st.session_state.processando_venda):
-                    st.session_state.processando_venda = True
+                if produto_sel:
+                    item = df_produtos[df_produtos['Nome_Produto'] == produto_sel].iloc[0]
+                    unidade = str(item['Unidade_Medida']).upper()
                     
-                    with st.spinner("Processando operação e atualizando estoque..."):
-                        df_vendas = ler_aba("Vendas")
-                        if 'Tipo_Saida' not in df_vendas.columns:
-                            df_vendas['Tipo_Saida'] = "Venda Normal"
-                            
-                        nova_venda = pd.DataFrame([{
-                            "ID_Venda": len(df_vendas) + 1,
-                            "Data_Hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "ID_Produto": item['ID_Produto'],
-                            "Nome_Produto": item['Nome_Produto'],
-                            "Quantidade": qtd,
-                            "Preco_Unitario": item['Preco_Venda'] if "Venda Normal" in tipo_operacao else 0.0,
-                            "Valor_Total": total_operacao,
-                            "Tipo_Saida": tipo_operacao
-                        }])
-                        df_vendas_atualizado = pd.concat([df_vendas, nova_venda], ignore_index=True)
-                        atualizar_aba("Vendas", df_vendas_atualizado)
+                    col_a, col_b, col_c = st.columns(3)
+                    col_a.write(f"**Preço Venda:** R$ {item['Preco_Venda']:.2f}")
+                    col_b.write(f"**Custo Unitário:** R$ {item['Custo_Unitario']:.2f}")
+                    col_c.write(f"**Estoque Disponível:** {item['Quantidade_Estoque']:.3f} {unidade}")
+                    
+                    if unidade in ['KG', 'L']:
+                        qtd = st.number_input(
+                            f"Quantidade em {unidade} (ex: 0.150 para 150g)", 
+                            min_value=0.001, 
+                            max_value=float(item['Quantidade_Estoque']), 
+                            value=min(1.0, float(item['Quantidade_Estoque'])), 
+                            step=0.050, 
+                            format="%.3f"
+                        )
+                    else:
+                        qtd = st.number_input(
+                            f"Quantidade em {unidade}", 
+                            min_value=1, 
+                            max_value=int(item['Quantidade_Estoque']), 
+                            value=1, 
+                            step=1
+                        )
+                    
+                    if "Venda Normal" in tipo_operacao:
+                        total_operacao = float(qtd) * float(item['Preco_Venda'])
+                        st.subheader(f"Total a Cobrar: R$ {total_operacao:.2f}")
+                    else:
+                        custo_total_consumo = float(qtd) * float(item['Custo_Unitario'])
+                        st.warning(f"⚠️ **Saída sem cobrança.** Custo gerado para o caixa: **R$ {custo_total_consumo:.2f}**")
+                        total_operacao = 0.0
+                    
+                    # Controle de trava contra duplo clique mantendo a visibilidade da mensagem
+                    if "processando_venda" not in st.session_state:
+                        st.session_state.processando_venda = False
+
+                    if st.button("Confirmar Operação", type="primary", disabled=st.session_state.processando_venda):
+                        st.session_state.processando_venda = True
                         
-                        if "Venda Normal" not in tipo_operacao:
-                            df_despesas = ler_aba("Despesas_Extras")
-                            nova_despesa = pd.DataFrame([{
-                                "ID_Despesa": len(df_despesas) + 1,
-                                "Data": datetime.now().strftime("%Y-%m-%d"),
-                                "Categoria_Despesa": tipo_operacao.replace("🛒 ", "").replace("🏠 ", "").replace("🎁 ", ""),
-                                "Descricao": f"Custo de {qtd} {unidade} de {item['Nome_Produto']}",
-                                "Valor": float(qtd) * float(item['Custo_Unitario'])
+                        with st.spinner("Processando operação e atualizando estoque..."):
+                            df_vendas = ler_aba("Vendas")
+                            if 'Tipo_Saida' not in df_vendas.columns:
+                                df_vendas['Tipo_Saida'] = "Venda Normal"
+                                
+                            nova_venda = pd.DataFrame([{
+                                "ID_Venda": len(df_vendas) + 1,
+                                "Data_Hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "ID_Produto": item['ID_Produto'],
+                                "Nome_Produto": item['Nome_Produto'],
+                                "Quantidade": qtd,
+                                "Preco_Unitario": item['Preco_Venda'] if "Venda Normal" in tipo_operacao else 0.0,
+                                "Valor_Total": total_operacao,
+                                "Tipo_Saida": tipo_operacao
                             }])
-                            atualizar_aba("Despesas_Extras", pd.concat([df_despesas, nova_despesa], ignore_index=True))
+                            df_vendas_atualizado = pd.concat([df_vendas, nova_venda], ignore_index=True)
+                            atualizar_aba("Vendas", df_vendas_atualizado)
+                            
+                            if "Venda Normal" not in tipo_operacao:
+                                df_despesas = ler_aba("Despesas_Extras")
+                                nova_despesa = pd.DataFrame([{
+                                    "ID_Despesa": len(df_despesas) + 1,
+                                    "Data": datetime.now().strftime("%Y-%m-%d"),
+                                    "Categoria_Despesa": tipo_operacao.replace("🛒 ", "").replace("🏠 ", "").replace("🎁 ", ""),
+                                    "Descricao": f"Custo de {qtd} {unidade} de {item['Nome_Produto']}",
+                                    "Valor": float(qtd) * float(item['Custo_Unitario'])
+                                }])
+                                atualizar_aba("Despesas_Extras", pd.concat([df_despesas, nova_despesa], ignore_index=True))
+                            
+                            df_produtos.loc[df_produtos['Nome_Produto'] == produto_sel, 'Quantidade_Estoque'] -= qtd
+                            atualizar_aba("Produtos_Estoque", df_produtos)
                         
-                        df_produtos.loc[df_produtos['Nome_Produto'] == produto_sel, 'Quantidade_Estoque'] -= qtd
+                        st.session_state.processando_venda = False
+                        st.success(f"✅ Operação '{tipo_operacao}' registrada com sucesso! ({qtd} {unidade} de {produto_sel})")
+                        st.balloons()
+
+    elif sub_pdv == "Cancelar Venda Recente":
+        st.subheader("🚫 Cancelamento de Venda no Caixa")
+        st.markdown("Selecione uma venda recente para estornar o item ao estoque e registrar na auditoria.")
+        
+        df_vendas = ler_aba("Vendas")
+        df_canceladas = ler_aba("Vendas_Canceladas")
+        
+        if df_vendas.empty:
+            st.info("Não há vendas registradas para cancelar.")
+        else:
+            # Mostra apenas as vendas do dia ou as últimas para o operador não ver o histórico financeiro completo
+            df_vendas['Label_Cancel'] = df_vendas.apply(
+                lambda row: f"ID: {row['ID_Venda']} | Data: {row['Data_Hora']} | Produto: {row['Nome_Produto']} | Qtd: {row['Quantidade']} | Total: R$ {float(row['Valor_Total']):.2f}", 
+                axis=1
+            )
+            
+            venda_para_cancelar = st.selectbox("Selecione a Venda para Cancelar", df_vendas['Label_Cancel'].tolist())
+            motivo_cancelamento = st.text_input("Motivo Obrigatório (ex: Erro de digitação / Duplo clique do cliente)")
+            
+            if st.button("⚠️ Confirmar Cancelamento da Venda", type="secondary"):
+                if not motivo_cancelamento.strip():
+                    st.error("⚠️ Por favor, informe o motivo do cancelamento.")
+                else:
+                    venda_sel = df_vendas[df_vendas['Label_Cancel'] == venda_para_cancelar].iloc[0]
+                    
+                    id_venda_alvo = venda_sel['ID_Venda']
+                    id_produto_alvo = venda_sel['ID_Produto']
+                    qtd_estornar = float(venda_sel['Quantidade'])
+                    
+                    # 1. Salva na aba de auditoria
+                    registro_cancelado = pd.DataFrame([{
+                        "ID_Venda_Original": id_venda_alvo,
+                        "Data_Hora_Venda": venda_sel['Data_Hora'],
+                        "Data_Hora_Cancelamento": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "ID_Produto": id_produto_alvo,
+                        "Nome_Produto": venda_sel['Nome_Produto'],
+                        "Quantidade_Estornada": qtd_estornar,
+                        "Valor_Total": venda_sel['Valor_Total'],
+                        "Motivo": motivo_cancelamento
+                    }])
+                    
+                    df_canceladas_novo = pd.concat([df_canceladas, registro_cancelado], ignore_index=True)
+                    atualizar_aba("Vendas_Canceladas", df_canceladas_novo)
+                    
+                    # 2. Devolve ao estoque
+                    df_produtos['ID_Produto'] = pd.to_numeric(df_produtos['ID_Produto'], errors='coerce')
+                    df_produtos['Quantidade_Estoque'] = pd.to_numeric(df_produtos['Quantidade_Estoque'], errors='coerce').fillna(0.0)
+                    
+                    mask_prod = df_produtos['ID_Produto'] == id_produto_alvo
+                    if mask_prod.any():
+                        df_produtos.loc[mask_prod, 'Quantidade_Estoque'] += qtd_estornar
                         atualizar_aba("Produtos_Estoque", df_produtos)
                     
-                    st.session_state.processando_venda = False
-                    st.success(f"✅ Operação '{tipo_operacao}' registrada com sucesso! ({qtd} {unidade} de {produto_sel})")
+                    # 3. Remove das vendas ativas
+                    df_vendas_novo = df_vendas[df_vendas['ID_Venda'] != id_venda_alvo]
+                    if 'Label_Cancel' in df_vendas_novo.columns:
+                        df_vendas_novo = df_vendas_novo.drop(columns=['Label_Cancel'])
+                        
+                    atualizar_aba("Vendas", df_vendas_novo)
+                    
+                    st.success(f"✅ Venda ID {id_venda_alvo} cancelada com sucesso! O estoque foi estornado.")
                     st.balloons()
-                    st.rerun()
 
 # -------------------------------------------------------------------
 # 2. CADASTRO E ENTRADA DE ESTOQUE
@@ -452,7 +517,7 @@ elif menu == "Despesas Extras":
                 st.balloons()
 
 # -------------------------------------------------------------------
-# 6. FATURAMENTO, FINANCEIRO E AUDITORIA DE CANCELAMENTOS
+# 6. FATURAMENTO E FINANCEIRO (Com Auditoria de Cancelamentos)
 # -------------------------------------------------------------------
 elif menu == "Faturamento e Financeiro":
     st.header("📈 Visão Financeira Geral (DRE) & Auditoria")
@@ -524,70 +589,9 @@ elif menu == "Faturamento e Financeiro":
         st.subheader("Histórico Geral de Despesas Extras / Custos Internos")
         st.dataframe(df_despesas, use_container_width=True)
         
-    # --- CANCELAMENTO COM REGISTRO DE AUDITORIA ---
-    st.divider()
-    st.subheader("🚫 Cancelamento de Venda com Registro de Auditoria")
-    st.markdown("Cancele vendas com erro de lançamento. O sistema estornará o estoque, corrigirá o caixa e **salvará o histórico do cancelamento para auditoria**.")
-    
-    if df_vendas.empty:
-        st.info("Não há vendas registradas para cancelar.")
-    else:
-        df_vendas['Label_Cancel'] = df_vendas.apply(
-            lambda row: f"ID Venda: {row['ID_Venda']} | Data: {row['Data_Hora']} | Produto: {row['Nome_Produto']} | Qtd: {row['Quantidade']} | Total: R$ {float(row['Valor_Total']):.2f}", 
-            axis=1
-        )
-        
-        venda_para_cancelar = st.selectbox("Selecione a Venda a Cancelar", df_vendas['Label_Cancel'].tolist())
-        motivo_cancelamento = st.text_input("Motivo do Cancelamento (ex: Erro de lançamento / Duplo clique)")
-        
-        if st.button("⚠️ Confirmar e Auditoriar Cancelamento", type="secondary"):
-            if not motivo_cancelamento.strip():
-                st.error("⚠️ Por favor, escreva o motivo do cancelamento antes de continuar.")
-            else:
-                venda_sel = df_vendas[df_vendas['Label_Cancel'] == venda_para_cancelar].iloc[0]
-                
-                id_venda_alvo = venda_sel['ID_Venda']
-                id_produto_alvo = venda_sel['ID_Produto']
-                qtd_estornar = float(venda_sel['Quantidade'])
-                
-                # 1. Copia o registro para a aba 'Vendas_Canceladas' para auditoria
-                registro_cancelado = pd.DataFrame([{
-                    "ID_Venda_Original": id_venda_alvo,
-                    "Data_Hora_Venda": venda_sel['Data_Hora'],
-                    "Data_Hora_Cancelamento": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "ID_Produto": id_produto_alvo,
-                    "Nome_Produto": venda_sel['Nome_Produto'],
-                    "Quantidade_Estornada": qtd_estornar,
-                    "Valor_Total": venda_sel['Valor_Total'],
-                    "Motivo": motivo_cancelamento
-                }])
-                
-                df_canceladas_novo = pd.concat([df_canceladas, registro_cancelado], ignore_index=True)
-                atualizar_aba("Vendas_Canceladas", df_canceladas_novo)
-                
-                # 2. Devolve o produto ao estoque
-                df_produtos['ID_Produto'] = pd.to_numeric(df_produtos['ID_Produto'], errors='coerce')
-                df_produtos['Quantidade_Estoque'] = pd.to_numeric(df_produtos['Quantidade_Estoque'], errors='coerce').fillna(0.0)
-                
-                mask_prod = df_produtos['ID_Produto'] == id_produto_alvo
-                if mask_prod.any():
-                    df_produtos.loc[mask_prod, 'Quantidade_Estoque'] += qtd_estornar
-                    atualizar_aba("Produtos_Estoque", df_produtos)
-                
-                # 3. Remove da tabela de vendas ativas
-                df_vendas_novo = df_vendas[df_vendas['ID_Venda'] != id_venda_alvo]
-                if 'Label_Cancel' in df_vendas_novo.columns:
-                    df_vendas_novo = df_vendas_novo.drop(columns=['Label_Cancel'])
-                    
-                atualizar_aba("Vendas", df_vendas_novo)
-                
-                st.success(f"✅ Venda ID {id_venda_alvo} cancelada e movida para a aba de Auditoria! {qtd_estornar} unidade(s) devolvida(s) ao estoque.")
-                st.balloons()
-                st.rerun()
-
-    # Exibe a tabela de auditoria de cancelamentos
     if not df_canceladas.empty:
-        st.subheader("🕵️ Histórico de Vendas Canceladas (Auditoria)")
+        st.divider()
+        st.subheader("🕵️ Histórico de Vendas Canceladas (Auditoria Gerencial)")
         st.dataframe(df_canceladas, use_container_width=True)
 
 # -------------------------------------------------------------------
